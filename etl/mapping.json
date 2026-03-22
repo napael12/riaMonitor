@@ -1,0 +1,30 @@
+[
+  {
+    "file": "Organization CRD#",
+    "db": "crd"
+  },
+  {
+    "file": "Legal Name",
+    "db": "firm_name"
+  },
+  {
+    "file": "SEC#",
+    "db": "sec_number"
+  },
+  {
+    "file": "Main Office State",
+    "db": "primary_state"
+  },
+  {
+    "file": "5F(2)(c)",
+    "db": "aum"
+  },
+  {
+    "file": "5A",
+    "db": "employees"
+  },
+  {
+    "file": "SEC Current Status",
+    "db": "registration_status"
+  }
+]
