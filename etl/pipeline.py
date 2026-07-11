@@ -3,9 +3,10 @@
 pipeline.py — SEC Investment Adviser Monitor ETL pipeline.
 
 Usage:
-  python pipeline.py                   # download latest, auto-detect period
-  python pipeline.py --period 202603   # March 2026 (yyyyMM format)
-  python pipeline.py --dry-run         # download + parse but don't write to DB
+  python pipeline.py                          # download latest, auto-detect period
+  python pipeline.py --period 202603         # March 2026 (yyyyMM format)
+  python pipeline.py --start-period 202601   # backfill from Jan 2026 to latest
+  python pipeline.py --dry-run               # download + parse but don't write to DB
 
 The pipeline:
   1. Scrapes the SEC IAPD page for the registered + exempt Excel URLs
@@ -38,6 +39,7 @@ from downloader import (
     download_file,
     get_latest_urls,
     get_urls_for_period,
+    get_urls_from_period,
 )
 from differ import compute_changes, get_previous_period
 from loader import load_snapshot, period_already_ingested
@@ -222,9 +224,107 @@ def _run_local(period_yyyymm: str | None, dry_run: bool) -> None:
     _log("=== Local pipeline complete ===")
 
 
-def run(period_yyyymm: str | None = None, dry_run: bool = False, local: bool = False) -> None:
+def _run_from_period(start_period_yyyymm: str, dry_run: bool) -> None:
+    """
+    Download and ingest every available period on or after start_period_yyyymm,
+    skipping any period already present in the database.
+    """
+    import pandas as pd
+
+    _log("=== SEC Investment Adviser Monitor — ETL Pipeline (backfill mode) ===")
+
+    _log(f"Step 1: Fetching all available periods from {start_period_yyyymm} onwards …")
+    try:
+        period_entries = get_urls_from_period(start_period_yyyymm, SEC_PAGE_URL)
+    except Exception as exc:
+        _log(f"ERROR fetching SEC page: {exc}")
+        sys.exit(1)
+
+    _log(
+        f"  Found {len(period_entries)} period(s): "
+        + ", ".join(e["period"] for e in period_entries)
+    )
+
+    if not dry_run:
+        try:
+            conn = _get_db_conn()
+        except Exception as exc:
+            _log(f"ERROR connecting to database: {exc}")
+            sys.exit(1)
+    else:
+        conn = None  # type: ignore[assignment]
+
+    for entry in period_entries:
+        period = entry["period"]
+        _log(f"\n--- Period {period} ---")
+
+        if not dry_run and period_already_ingested(period, conn):
+            _log(f"  Already ingested — skipping.")
+            continue
+
+        _log("  Downloading data files …")
+        try:
+            reg_path = download_file(entry["registered"], DATA_DIR)
+            ex_path = download_file(entry["exempt"], DATA_DIR)
+        except Exception as exc:
+            _log(f"  ERROR downloading: {exc} — skipping period.")
+            continue
+
+        _log("  Parsing data files …")
+        try:
+            df_reg = parse_xlsx(reg_path, registration_type="SEC")
+            df_ex = parse_xlsx(ex_path, registration_type="Exempt")
+        except Exception as exc:
+            _log(f"  ERROR parsing: {exc} — skipping period.")
+            continue
+
+        df_all = pd.concat([df_reg, df_ex], ignore_index=True)
+        df_all = df_all.drop_duplicates(subset=["crd"], keep="last")
+        _log(
+            f"  {len(df_all):,} rows after merge + dedup "
+            f"({len(df_reg):,} registered + {len(df_ex):,} exempt)"
+        )
+
+        if dry_run:
+            _log(f"  Dry-run — sample:\n{df_all[['crd', 'firm_name', 'aum', 'employees']].head(5)}")
+            continue
+
+        try:
+            count = load_snapshot(df_all, period, conn)
+            _log(f"  {count:,} rows loaded.")
+        except Exception as exc:
+            _log(f"  ERROR loading data: {exc}")
+            conn.rollback()
+            continue
+
+        try:
+            prev_period = get_previous_period(period, conn)
+            if prev_period:
+                n_changes = compute_changes(prev_period, period, conn)
+                _log(f"  {n_changes:,} changes detected ({prev_period} → {period})")
+            else:
+                _log("  No previous period in DB — skipping diff.")
+        except Exception as exc:
+            _log(f"  ERROR computing changes: {exc}")
+            conn.rollback()
+
+    if conn:
+        conn.close()
+    _log("=== Backfill pipeline complete ===")
+
+
+def run(
+    period_yyyymm: str | None = None,
+    dry_run: bool = False,
+    local: bool = False,
+    start_period_yyyymm: str | None = None,
+) -> None:
     if local:
         _run_local(period_yyyymm, dry_run)
+        return
+
+    if start_period_yyyymm:
+        _run_from_period(start_period_yyyymm, dry_run)
         return
 
     _log("=== SEC Investment Adviser Monitor — ETL Pipeline ===")
@@ -380,9 +480,23 @@ def main() -> None:
             "Use --period YYYYMM when filenames don't encode the date."
         ),
     )
+    parser.add_argument(
+        "--start-period",
+        metavar="YYYYMM",
+        help=(
+            "Backfill mode: download and ingest all periods available on the SEC page "
+            "on or after this month (e.g. 202601 for January 2026). "
+            "Periods already in the database are skipped automatically."
+        ),
+    )
     args = parser.parse_args()
 
-    run(period_yyyymm=args.period, dry_run=args.dry_run, local=args.local)
+    run(
+        period_yyyymm=args.period,
+        dry_run=args.dry_run,
+        local=args.local,
+        start_period_yyyymm=args.start_period,
+    )
 
 
 if __name__ == "__main__":

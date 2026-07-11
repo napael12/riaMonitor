@@ -161,6 +161,47 @@ def get_latest_urls(page_url: str = SEC_PAGE_URL) -> dict[str, str]:
     }
 
 
+def get_urls_from_period(
+    start_period_yyyymm: str, page_url: str = SEC_PAGE_URL
+) -> list[dict[str, str]]:
+    """
+    Return URLs for all periods on or after start_period_yyyymm, sorted ascending.
+
+    start_period_yyyymm: six-digit string in yyyyMM format, e.g. ``"202603"`` for March 2026.
+
+    Returns a list of dicts, each with keys:
+        {"period": "YYYY-MM", "registered": "<url>", "exempt": "<url>"}
+
+    Raises:
+        ValueError: if no periods are found on or after the given start period.
+    """
+    if not re.match(r"^\d{6}$", start_period_yyyymm):
+        raise ValueError(
+            f"start_period must be in yyyyMM format (e.g. 202603), got: {start_period_yyyymm!r}"
+        )
+
+    start_key = f"{start_period_yyyymm[:4]}-{start_period_yyyymm[4:]}"
+    registered, exempt = _scrape_all_urls(page_url)
+
+    results = []
+    for period_key in sorted(registered.keys()):
+        if period_key >= start_key and period_key in exempt:
+            results.append(
+                {
+                    "period": period_key,
+                    "registered": registered[period_key],
+                    "exempt": exempt[period_key],
+                }
+            )
+
+    if not results:
+        raise ValueError(
+            f"No periods found on or after {start_period_yyyymm} on page: {page_url}"
+        )
+
+    return results
+
+
 def get_urls_for_period(period_yyyymm: str, page_url: str = SEC_PAGE_URL) -> dict[str, str]:
     """
     Return URLs for the registered and exempt files for a specific period.
